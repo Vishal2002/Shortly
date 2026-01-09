@@ -4,6 +4,13 @@
 
 ---
 
+
+<p align="center">
+  <img src="./architecture.png" alt="Shortly Architecture Diagram" width="100%" />
+</p>
+
+---
+
 ## 🚀 What Shortly Does
 
 * Ingests **YouTube videos**
