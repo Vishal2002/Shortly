@@ -1,0 +1,12 @@
+{
+  "extends": "../config/typescript/node.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": ".",
+    "paths": {
+      "@prisma/client": ["./generated/prisma/client"]
+    }
+  },
+  "include": ["src/**/*", "generated/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
