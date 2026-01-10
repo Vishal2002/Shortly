@@ -109,7 +109,7 @@ pnpm docker:logs      # View logs
 ## 🗂 Project Structure
 
 ```
-shortflow/
+shortly/
 ├── apps/                     # Deployable applications
 │   ├── api/                  # NestJS API
 │   ├── web/                  # Next.js frontend

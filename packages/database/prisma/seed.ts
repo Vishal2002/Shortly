@@ -14,10 +14,10 @@ async function main() {
 
   // Create test user
   const user = await prisma.user.upsert({
-    where: { email: 'test@shortflow.com' },
+    where: { email: 'test@shortly.com' },
     update: {},
     create: {
-      email: 'test@shortflow.com',
+      email: 'test@shortly.com',
       name: 'Test User',
       plan: 'pro',
       videosLimit: 100,

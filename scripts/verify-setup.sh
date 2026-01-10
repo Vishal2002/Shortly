@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "🔍 Verifying ShortFlow setup..."
+echo "🔍 Verifying Shorty setup..."
 
 # Check if Docker is running
 if ! docker ps > /dev/null 2>&1; then
@@ -9,7 +9,7 @@ if ! docker ps > /dev/null 2>&1; then
 fi
 
 # Check PostgreSQL
-if docker ps | grep -q shortflow-postgres; then
+if docker ps | grep -q shortly-postgres; then
   echo "✅ PostgreSQL is running"
 else
   echo "❌ PostgreSQL is not running"
@@ -17,7 +17,7 @@ else
 fi
 
 # Check Redis
-if docker ps | grep -q shortflow-redis; then
+if docker ps | grep -q shortly-redis; then
   echo "✅ Redis is running"
 else
   echo "❌ Redis is not running"
@@ -25,7 +25,7 @@ else
 fi
 
 # Check MinIO
-if docker ps | grep -q shortflow-minio; then
+if docker ps | grep -q shortly-minio; then
   echo "✅ MinIO is running"
 else
   echo "❌ MinIO is not running"
