@@ -19,6 +19,7 @@ async function main() {
     create: {
       email: 'test@shortly.com',
       name: 'Test User',
+      password: 'password123',
       plan: 'pro',
       videosLimit: 100,
     },

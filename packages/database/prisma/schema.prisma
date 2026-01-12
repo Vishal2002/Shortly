@@ -18,6 +18,7 @@ model User {
   email     String   @unique
   name      String?
   avatar    String?
+   password  String 
   
   // YouTube OAuth
   youtubeChannelId    String?
