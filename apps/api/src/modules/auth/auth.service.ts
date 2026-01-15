@@ -18,13 +18,14 @@ export class AuthService {
       password: hashedPassword,
       name,
     });
+    console.log('Registered user:', user);
 
     return this.generateTokens(user);
   }
 
   async login(email: string, password: string) {
     const user = await this.usersService.findByEmail(email);
-    
+    //@ts-ignore
     if (!user || !(await bcrypt.compare(password, user.password))) {
       throw new Error('Invalid credentials');
     }
