@@ -7,13 +7,18 @@ services:
     container_name: shortly-postgres
     restart: unless-stopped
     ports:
-      - "5431:5432"
+      - "5432:5432"
     environment:
       POSTGRES_USER: shortly
       POSTGRES_PASSWORD: shortly123
       POSTGRES_DB: shortly
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortly -d shortly"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -26,7 +31,6 @@ services:
     volumes:
       - redis_data:/data
 
-  # RedisInsight instead of redis-commander (ARM64 compatible)
   redis-insight:
     image: redis/redisinsight:latest
     platform: linux/arm64
