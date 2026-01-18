@@ -9,14 +9,15 @@ import { UsersModule } from '../users/user.module';
 @Module({
   imports: [
     UsersModule,
-    PassportModule,
+    PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.register({
-      secret: process.env.JWT_SECRET || 'your-secret-key',
+      global: true,
+      secret: process.env.JWT_SECRET || 'secretkey123',
       signOptions: { expiresIn: '7d' },
     }),
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],
-  exports: [AuthService],
+  exports: [AuthService, JwtStrategy, PassportModule],
 })
 export class AuthModule {}
