@@ -1,29 +1,30 @@
 import { Injectable } from '@nestjs/common';
 import { prisma } from '@shortly/database';
-
+import { addDownloadJob } from '@shortly/queue';
 
 @Injectable()
 export class JobsService {
   async create(userId: string, youtubeUrl: string, options: any): Promise<any> {
-    return prisma.job.create({
+    // Create job in database
+    const job = await prisma.job.create({
       data: {
         userId,
         youtubeUrl,
         status: 'queued',
         progress: 0,
-        currentStep: 'Validating URL...',
+        currentStep: 'Queued for processing...',
         options,
       },
-      include: {
-        user: {
-          select: {
-            id: true,
-            email: true,
-            name: true,
-          },
-        },
-      },
     });
+
+    // Add to download queue
+    await addDownloadJob({
+      jobId: job.id,
+      youtubeUrl,
+      userId,
+    });
+
+    return job;
   }
 
   async findByUserId(userId: string): Promise<any[]> {
