@@ -3,8 +3,10 @@ import { prisma } from '@shortly/database';
 import { uploadFile } from '@shortly/storage';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { addAnalysisJob } from '@shortly/queue';    
 import * as fs from 'fs';
 import * as path from 'path';
+
 
 const execAsync = promisify(exec);
 
@@ -109,6 +111,8 @@ const worker = new Worker(
       });
 
       await updateJobStatus(jobId, 'completed', 100, 'Download complete!');
+
+      await addAnalysisJob({ jobId, videoId: video.id });
 
       console.log(`✅ Job ${jobId} completed successfully`);
 

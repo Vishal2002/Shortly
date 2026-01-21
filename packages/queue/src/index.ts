@@ -18,4 +18,11 @@ export async function addDownloadJob(data: any) {
   });
 }
 
+export async function addAnalysisJob(data: any) {
+    return analysisQueue.add('analyze-video', data, {
+      attempts: 2,
+      backoff: { type: 'exponential', delay: 3000 },
+    });
+  }
+
 export { Queue, Worker, Job };
