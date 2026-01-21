@@ -25,3 +25,11 @@ export interface UploadJobData {
   clipId: string;
   userId: string;
 }
+
+export interface UploadOptions {
+  bucket: string;
+  key: string;
+  filePath: string;
+  contentType?: string;
+  onProgress?: (progress: { loaded: number; total?: number }) => void;
+}

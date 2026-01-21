@@ -1,8 +1,10 @@
 import { Worker, Job } from 'bullmq';
 import { prisma } from '@shortly/database';
+import { uploadFile } from '@shortly/storage';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
+import * as path from 'path';
 
 const execAsync = promisify(exec);
 
@@ -10,7 +12,6 @@ const connection = {
     url: process.env.REDIS_URL || 'redis://localhost:6380',
     maxRetriesPerRequest: null,
   };
-  
 
 console.log('🎬 Download Worker starting...');
 
@@ -37,7 +38,7 @@ const worker = new Worker(
       
       await updateJobStatus(jobId, 'downloading', 30, 'Downloading from YouTube...');
 
-      // Real yt-dlp command
+      // Download with yt-dlp
       const downloadCommand = `
         yt-dlp \
           -f "bestvideo[height<=1080]+bestaudio[ext=m4a]/best[height<=1080]" \
@@ -50,7 +51,37 @@ const worker = new Worker(
       
       await execAsync(downloadCommand, { maxBuffer: 50 * 1024 * 1024 });
 
-      await updateJobStatus(jobId, 'downloading', 70, 'Download complete! Saving...');
+      await updateJobStatus(jobId, 'downloading', 60, 'Download complete! Uploading to storage...');
+
+      // Find the downloaded video file
+      const files = fs.readdirSync(outputDir);
+      const videoFile = files.find(f => f.startsWith('video.') && (f.endsWith('.mp4') || f.endsWith('.webm')));
+      
+      if (!videoFile) {
+        throw new Error('Downloaded video file not found');
+      }
+
+      const videoPath = path.join(outputDir, videoFile);
+      console.log(`📤 Uploading to MinIO: ${videoFile}`);
+
+      // Upload to MinIO
+      const s3Key = `raw-videos/${videoId}/${videoFile}`;
+      await uploadFile({
+        bucket: process.env.S3_BUCKET_RAW_VIDEOS || 'raw-videos',
+        key: s3Key,
+        filePath: videoPath,
+        contentType: 'video/mp4',
+        onProgress: (progress:any) => {
+          const percent = progress.total 
+            ? Math.round((progress.loaded / progress.total) * 100) 
+            : 0;
+          console.log(`Upload progress: ${percent}%`);
+        },
+      });
+
+      console.log(`✅ Uploaded to MinIO: ${s3Key}`);
+
+      await updateJobStatus(jobId, 'downloading', 80, 'Saving metadata...');
 
       // Read metadata
       const metadataPath = `${outputDir}/video.info.json`;
@@ -66,7 +97,7 @@ const worker = new Worker(
           description: metadata.description || null,
           duration: metadata.duration || 0,
           thumbnailUrl: metadata.thumbnail || null,
-          s3Key: `${videoId}/video.mp4`,
+          s3Key: s3Key,
           status: 'downloaded',
           metadata: metadata,
         },
@@ -81,7 +112,7 @@ const worker = new Worker(
 
       console.log(`✅ Job ${jobId} completed successfully`);
 
-      // Clean up
+      // Clean up temp files
       await execAsync(`rm -rf ${outputDir}`);
 
       return { success: true, videoId: video.id };
