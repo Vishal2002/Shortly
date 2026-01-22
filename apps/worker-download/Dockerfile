@@ -1,39 +1,75 @@
-FROM node:20-bookworm
+# Force arm64 platform
+FROM --platform=linux/arm64 node:20.19-alpine
 
-RUN apt-get update && apt-get install -y \
+# Install system dependencies
+# NOTE: We're installing nodejs separately even though base image has it
+# because yt-dlp needs it available in PATH for JavaScript execution
+RUN apk add --no-cache \
     python3 \
-    python3-pip \
+    py3-pip \
     ffmpeg \
-    curl \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    openssl \
+    curl \
+    wget \
+    build-base \
+    git \
+    nodejs
 
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-    -o /usr/local/bin/yt-dlp \
-    && chmod a+rx /usr/local/bin/yt-dlp
+# Update CA certificates (critical for SSL)
+RUN update-ca-certificates
 
-RUN yt-dlp --version
+# Enable Corepack + PNPM
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN npm install -g corepack@latest && \
+    corepack enable && \
+    corepack prepare pnpm@10.14.0 --activate
+
+# Install yt-dlp and configure for Node.js runtime
+RUN wget -q https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+    -O /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp
+
+# Verify installations and set yt-dlp to use Node.js
+RUN yt-dlp --version && \
+    node --version && \
+    echo "yt-dlp will use Node.js runtime"
 
 WORKDIR /app
 
-RUN corepack enable
+# Copy package files for dependency caching
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* turbo.json* ./
+COPY packages/database/package.json ./packages/database/
+COPY packages/types/package.json* ./packages/types/
+COPY packages/queue/package.json ./packages/queue/
+COPY packages/storage/package.json ./packages/storage/
+COPY packages/config/package.json* ./packages/config/
+COPY apps/worker-download/package.json ./apps/worker-download/
 
-COPY pnpm-workspace.yaml package.json ./
-COPY packages/database ./packages/database
-COPY packages/types ./packages/types
-COPY packages/queue ./packages/queue
-COPY packages/config ./packages/config
-COPY packages/storage ./packages/storage
+# Install dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy source code
+COPY packages ./packages
 COPY apps/worker-download ./apps/worker-download
 
-RUN pnpm install --no-frozen-lockfile
+# Generate Prisma client
+RUN cd packages/database && pnpm prisma generate
 
-RUN cd packages/database && pnpm run build
-RUN cd packages/types && pnpm run build
-RUN cd packages/queue && pnpm run build
-RUN cd packages/storage && pnpm run build
-RUN cd apps/worker-download && pnpm run build
+# Build packages
+RUN pnpm --filter @shortly/types build 2>/dev/null || true
+RUN pnpm --filter @shortly/config build 2>/dev/null || true
+RUN pnpm --filter @shortly/database build
+RUN pnpm --filter @shortly/queue build
+RUN pnpm --filter @shortly/storage build
 
+# Build worker
 WORKDIR /app/apps/worker-download
+RUN pnpm build
+
+ENV NODE_ENV=production
+
+# Create temp directory
+RUN mkdir -p /tmp && chmod 1777 /tmp
 
 CMD ["node", "dist/index.js"]
