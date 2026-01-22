@@ -110,6 +110,7 @@ model Segment {
   status          String   @default("detected")
   
   createdAt       DateTime @default(now())
+
   
   clips           Clip[]
   

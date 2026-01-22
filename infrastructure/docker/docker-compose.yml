@@ -80,7 +80,7 @@ services:
       sleep 5;
       /usr/bin/mc config host add myminio http://minio:9000 minioadmin minioadmin;
       /usr/bin/mc mb myminio/raw-videos --ignore-existing;
-      /usr/bin/mc mb myminio/processed-clips --ignore-existing;
+      /usr/bin/mc mb myminio/processed-shorts --ignore-existing;
       /usr/bin/mc mb myminio/thumbnails --ignore-existing;
       echo '✅ Buckets created successfully!';
       exit 0;
@@ -156,6 +156,45 @@ services:
         limits:
           cpus: '1'
           memory: 1G
+
+  worker-extraction:
+    build:
+      context: ../..
+      dockerfile: apps/worker-extraction/Dockerfile
+    platform: linux/arm64
+    container_name: shortly-worker-extraction
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://shortly:shortly123@postgres:5432/shortly
+      # Storage configuration for multiple buckets
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_REGION: us-east-1
+      S3_BUCKET_RAW_VIDEOS: raw-videos
+      S3_BUCKET_PROCESSED_SHORTS: processed-shorts
+      # AWS SDK compatibility
+      AWS_ENDPOINT: http://minio:9000
+      AWS_REGION: us-east-1 
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - /tmp:/tmp
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 3G
+
 
 volumes:
   postgres_data:

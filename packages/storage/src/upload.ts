@@ -1,7 +1,5 @@
 import { Upload } from '@aws-sdk/lib-storage';
 import fs from 'fs';
-
-
 import { createS3Client } from './client';
 
 interface UploadOptions {
@@ -12,6 +10,9 @@ interface UploadOptions {
   onProgress?: (progress: { loaded: number; total?: number }) => void;
 }
 
+/**
+ * Upload a file to S3/MinIO
+ */
 export async function uploadFile({
   bucket,
   key,
@@ -43,5 +44,5 @@ export async function uploadFile({
 
   await upload.done();
 
-  return key; // or return full URL if you build it
+  return key;
 }
