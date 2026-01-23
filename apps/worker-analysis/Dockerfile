@@ -23,6 +23,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
 COPY packages/database/package.json ./packages/database/
 COPY packages/types/package.json ./packages/types/
 COPY packages/queue/package.json ./packages/queue/
+COPY packages/storage/package.json ./packages/storage/
 COPY apps/worker-analysis/package.json ./apps/worker-analysis/
 
 # Enable Corepack + prepare exact pnpm version (match your lockfile / local setup)
@@ -46,6 +47,7 @@ RUN pnpm --filter @shortly/types build 2>/dev/null || true
 RUN pnpm --filter @shortly/config build 2>/dev/null || true
 RUN pnpm --filter @shortly/database build
 RUN pnpm --filter @shortly/queue build
+RUN pnpm --filter @shortly/storage build
 
 # Build the analysis worker
 WORKDIR /app/apps/worker-analysis
