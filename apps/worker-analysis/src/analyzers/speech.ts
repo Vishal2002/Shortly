@@ -1,8 +1,14 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
-
+import * as fs from 'fs';
+import OpenAI from 'openai';
 const execAsync = promisify(exec);
+const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+    timeout: 120000,         
+   
+  });
 
 export interface Transcript {
   text: string;
@@ -91,51 +97,53 @@ async function extractAudio(
  * Transcribe audio using OpenAI Whisper API
  */
 async function transcribeWithWhisper(audioPath: string): Promise<Transcript[]> {
-  const apiKey = process.env.OPENAI_API_KEY;
+    try {
+      // Try modern model first (better quality)
+      const result = await openai.audio.transcriptions.create({
+        file: fs.createReadStream(audioPath),
+        model: "gpt-4o-mini-transcribe",
+        response_format: "json",
+        language: "en",
+        prompt: "...",
+        temperature: 0,
+      });
   
-  if (!apiKey) {
-    console.warn('OPENAI_API_KEY not set, skipping speech analysis');
-    return [];
-  }
-
-  // Use Whisper API (or local Whisper model)
-  // For now, this is a placeholder - you'd implement actual API call
+      return [{
+        text: result.text,
+        startTime: 0,
+        endTime: 0,
+      }];
   
-  // Example with OpenAI SDK (install with: pnpm add openai)
-  try {
-    const FormData = require('form-data');
-    const fs = require('fs');
-    
-    const form = new FormData();
-    form.append('file', fs.createReadStream(audioPath));
-    form.append('model', 'whisper-1');
-    form.append('response_format', 'verbose_json');
-    form.append('timestamp_granularities', 'segment');
-
-    const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        ...form.getHeaders(),
-      },
-      body: form,
-    });
-
-    const data = await response.json() as any;
-
-    // Parse Whisper response
-    return data.segments?.map((seg: any) => ({
-      text: seg.text,
-      startTime: seg.start,
-      endTime: seg.end,
-      confidence: seg.confidence || 1,
-    })) || [];
-
-  } catch (error) {
-    console.error('Whisper API error:', error);
-    return [];
+    } catch (err: any) {
+      if (err?.message?.includes('response_format') || err?.message?.includes('model')) {
+        console.warn('Modern model failed, falling back to whisper-1');
+        
+        const fallback = await openai.audio.transcriptions.create({
+          file: fs.createReadStream(audioPath),
+          model: "whisper-1",
+          response_format: "verbose_json",
+          language: "en",
+          prompt: "...",
+          temperature: 0,
+          timestamp_granularities: ["segment"],
+        })as any;
+  
+        if ('segments' in fallback) {
+          return fallback.segments.map((s: any) => ({
+            text: s.text.trim(),
+            startTime: s.start,
+            endTime: s.end,
+            confidence: s.confidence,
+          }));
+        }
+  
+        return [{ text: fallback.text || "", startTime: 0, endTime: 0 }];
+      }
+  
+      console.error('Transcription failed:', err);
+      return [];
+    }
   }
-}
 
 /**
  * Analyze transcript for engagement signals
