@@ -1,288 +1,401 @@
 import { Worker, Job } from 'bullmq';
-import { prisma } from '@shortly/database';
-import { uploadFile, downloadFile } from '@shortly/storage';
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import { Prisma, prisma } from '@shortly/database';
+import { downloadFile, uploadFile } from '@shortly/storage';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+import { generateViralCaptions, generateASS, burnCaptions,generateSRT } from './captions';
 
 const execAsync = promisify(exec);
 
 const connection = {
-  url: process.env.REDIS_URL || 'redis://redis:6379',
+  url: process.env.REDIS_URL || 'redis://localhost:6379',
   maxRetriesPerRequest: null,
 };
 
-console.log('Extraction Worker starting...');
-console.log('Redis URL:', connection.url);
+console.log('✂️ Clip Extraction Worker starting...');
+console.log('📡 Redis:', connection.url.replace(/:[^:]+$/, ':****'));
+console.log('🎨 Captions:', process.env.OPENAI_API_KEY ? 'enabled' : 'disabled');
 
 const worker = new Worker(
   'extraction-queue',
   async (job: Job) => {
-    const { jobId, videoId, segmentId, start, end } = job.data as {
-      jobId: string;
-      videoId: string;
-      segmentId: string;
-      start: number;
-      end: number;
-    };
+    const { jobId, segmentId, start, end } = job.data;
 
-    console.log(`[segment:${segmentId}] Extracting clip (${start}s → ${end}s)`);
+    console.log(`[Job ${job.id}] Extracting clip ${segmentId} (${start}s → ${end}s)`);
 
-    let workDir: string | null = null;
-    let thumbnailKey: string | null = null;
+    let tempDir: string | null = null;
 
     try {
-      await updateJobStatus(jobId, 'extracting', 20, 'Fetching video & segment data');
+      // ────────────────────────────────────────────────────────────
+      // 1. Load segment and video metadata
+      // ────────────────────────────────────────────────────────────
+      await updateSegmentStatus(segmentId, 'extracting');
 
-      const [video, segment] = await Promise.all([
-        prisma.video.findUnique({
-          where: { id: videoId },
-          include: { user: true },
-        }),
-        prisma.segment.findUnique({ where: { id: segmentId } }),
-      ]);
+      const segment = await prisma.segment.findUnique({
+        where: { id: segmentId },
+        include: {
+          video: {
+            select: { id: true, title: true, s3Key: true, duration: true },
+          },
+        },
+      });
 
-      if (!video || !segment) {
-        throw new Error('Video or segment not found');
-      }
+      if (!segment) throw new Error(`Segment ${segmentId} not found`);
 
-      console.log(
-        `[segment:${segmentId}] Video: ${video.title} | Score: ${segment.compositeScore.toFixed(2)}`
-      );
+      const { video } = segment;
+      const duration = end - start;
 
-      workDir = await fs.mkdtemp(path.join('/tmp', `extract-${segmentId}-`));
-      const localVideoPath = path.join(workDir, 'input.mp4');
-      const outputClipPath = path.join(workDir, 'clip.mp4');
-      const thumbnailPath = path.join(workDir, 'thumbnail.png');
+      console.log(`Segment: ${segment.startTime}s → ${segment.endTime}s (${duration}s)`);
+      console.log(`Video: "${video.title}"`);
 
-      // ── Download raw video ───────────────────────────────────────
-      await updateJobStatus(jobId, 'extracting', 40, 'Downloading raw video');
+      // ────────────────────────────────────────────────────────────
+      // 2. Download source video
+      // ────────────────────────────────────────────────────────────
+      tempDir = await fs.mkdtemp('/tmp/extraction-');
+      const videoPath = path.join(tempDir, 'source.mp4');
+
+      console.log('⬇️ Downloading source video...');
       await downloadFile({
         bucket: process.env.S3_BUCKET_RAW_VIDEOS || 'raw-videos',
         key: video.s3Key,
-        filePath: localVideoPath,
+        filePath: videoPath,
       });
 
-      const sizeMB = (await fs.stat(localVideoPath)).size / (1024 * 1024);
-      console.log(`[segment:${segmentId}] Downloaded ${sizeMB.toFixed(2)} MB`);
+      const sizeMB = (await fs.stat(videoPath)).size / (1024 * 1024);
+      console.log(`Downloaded ${sizeMB.toFixed(1)} MB`);
 
-      const duration = end - start;
+      // ────────────────────────────────────────────────────────────
+      // 3. Extract clip (high quality, 9:16 vertical)
+      // ────────────────────────────────────────────────────────────
+      const clipPath = path.join(tempDir, 'clip.mp4');
 
-      // ── Extract clip ─────────────────────────────────────────────
-      // Extract clip – no metadata to avoid quoting issues
-      await updateJobStatus(jobId, 'extracting', 60, 'Extracting clip with FFmpeg');
-      const clipCmd = [
-        'ffmpeg',
-        '-ss',
-        start.toString(),
-        '-i',
-        localVideoPath,
-        '-t',
-        duration.toString(),
-        '-c:v',
-        'libx264',
-        '-preset',
-        'fast',
-        '-crf',
-        '23',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '128k',
-        '-movflags',
-        '+faststart',
-        '-y',
-        outputClipPath,
-      ].join(' ');
+      console.log('✂️ Extracting clip...');
+      await extractClip(videoPath, start, end, clipPath);
 
-      const { stderr } = await execAsync(clipCmd, { timeout: 300_000 });
-      if (stderr) console.log('FFmpeg clip stderr:', stderr);
+      const clipSizeMB = (await fs.stat(clipPath)).size / (1024 * 1024);
+      console.log(`Extracted ${clipSizeMB.toFixed(1)} MB clip`);
 
-      if (!(await fs.stat(outputClipPath).catch(() => false))) {
-        throw new Error('Clip not created – check FFmpeg logs above');
-      }
+      // ────────────────────────────────────────────────────────────
+      // 4. Generate and burn captions (if enabled)
+      // ────────────────────────────────────────────────────────────
+      let finalClipPath = clipPath;
+      let captionData = null;
+      const captionsEnabled = process.env.ENABLE_CAPTIONS !== 'false';
 
-      await execAsync(clipCmd, { timeout: 300_000 });
-      if (!(await fs.stat(outputClipPath).catch(() => false))) {
-        throw new Error('Clip file not created');
-      }
+      // In apps/worker-extraction/index.ts, modify the caption section:
 
-      // ── Generate thumbnail (PNG – more reliable) ─────────────────
-      await updateJobStatus(jobId, 'extracting', 75, 'Generating thumbnail');
-      const thumbTime = (start + end) / 2;
-      const thumbCmd = [
-        'ffmpeg',
-        '-ss',
-        thumbTime.toString(),
-        '-i',
-        `"${outputClipPath}"`,
-        '-vframes',
-        '1',
-        '-y',
-        `"${thumbnailPath}"`,
-      ].join(' ');
+      if (captionsEnabled && process.env.OPENAI_API_KEY) {
+        try {
+          console.log('🎨 Generating viral captions...');
 
-      try {
-        await execAsync(thumbCmd, { timeout: 30000 });
-        if (await fs.stat(thumbnailPath).catch(() => false)) {
-          thumbnailKey = `thumbnails/${video.youtubeId}/${segmentId}.png`;
-          await uploadFile({
-            bucket: process.env.S3_BUCKET_THUMBNAILS || 'thumbnails',
-            key: thumbnailKey,
-            filePath: thumbnailPath,
-            contentType: 'image/png',
-          });
-          console.log(`[segment:${segmentId}] Thumbnail uploaded → ${thumbnailKey}`);
+          const captions = await generateViralCaptions(
+            videoPath,
+            segment.startTime,
+            segment.endTime
+          );
+
+          if (captions.length > 0) {
+            console.log(`Generated ${captions.length} caption segments`);
+
+            // Generate BOTH SRT and ASS for flexibility
+            const srtContent = generateSRT(captions);
+            const assContent = generateASS(captions);
+
+            const srtPath = path.join(tempDir, 'captions.srt');
+            const assPath = path.join(tempDir, 'captions.ass');
+
+            await fs.writeFile(srtPath, srtContent);
+            await fs.writeFile(assPath, assContent);
+
+            // Log the SRT content for debugging
+            console.log('📝 SRT Preview:');
+            console.log(srtContent.substring(0, 300));
+
+            const captionedPath = path.join(tempDir, 'clip-captioned.mp4');
+
+            console.log('🔥 Burning captions into video...');
+
+            // Try SRT first (more reliable), fallback to ASS if needed
+            try {
+              await burnCaptions(clipPath, srtPath, captionedPath, 'srt');
+            } catch (srtError) {
+              console.warn('⚠️ SRT burning failed, trying ASS format...');
+              await burnCaptions(clipPath, assPath, captionedPath, 'ass');
+            }
+
+            // Verify the output file exists and has content
+            const captionedStats = await fs.stat(captionedPath);
+            if (captionedStats.size === 0) {
+              throw new Error('Captioned video file is empty');
+            }
+
+            finalClipPath = captionedPath;
+            captionData = captions;
+
+            const captionedSizeMB = captionedStats.size / (1024 * 1024);
+            console.log(`✅ Captioned clip: ${captionedSizeMB.toFixed(1)} MB`);
+          } else {
+            console.warn('⚠️ Caption generation returned empty, using plain clip');
+          }
+        } catch (err: any) {
+          console.error('⚠️ Caption generation/burning failed, using plain clip:', err.message);
+          console.error('Stack:', err.stack);
+          // Continue with plain clip - don't fail the whole job
         }
-      } catch (thumbErr: any) {
-        console.warn(`[segment:${segmentId}] Thumbnail failed (continuing): ${thumbErr.message}`);
+      } else {
+        console.log('ℹ️ Captions disabled or no OpenAI API key');
       }
 
-      // ── Upload clip ──────────────────────────────────────────────
-      await updateJobStatus(jobId, 'extracting', 85, 'Uploading clip');
-      const clipKey = `processed-shorts/${video.youtubeId}/${segmentId}.mp4`;
+      // ────────────────────────────────────────────────────────────
+      // 5. Generate thumbnail
+      // ────────────────────────────────────────────────────────────
+      const thumbnailPath = path.join(tempDir, 'thumbnail.jpg');
 
+      console.log('📸 Generating thumbnail...');
+      await generateThumbnail(finalClipPath, thumbnailPath);
+
+      // ────────────────────────────────────────────────────────────
+      // 6. Upload to S3
+      // ────────────────────────────────────────────────────────────
+      const clipKey = `processed-shorts/${video.id}/${segmentId}.mp4`;
+      const thumbnailKey = `thumbnails/${video.id}/${segmentId}.jpg`;
+
+      console.log('⬆️ Uploading clip...');
       await uploadFile({
         bucket: process.env.S3_BUCKET_PROCESSED_SHORTS || 'processed-shorts',
         key: clipKey,
-        filePath: outputClipPath,
+        filePath: finalClipPath,
         contentType: 'video/mp4',
       });
 
-      console.log(`[segment:${segmentId}] Clip uploaded → ${clipKey}`);
+      console.log('⬆️ Uploading thumbnail...');
+      await uploadFile({
+        bucket: process.env.S3_BUCKET_PROCESSED_SHORTS || 'processed-shorts',
+        key: thumbnailKey,
+        filePath: thumbnailPath,
+        contentType: 'image/jpeg',
+      });
 
-      // ── Generate metadata ────────────────────────────────────────
-      const clipTitle = generateClipTitle(video.title, segment);
-      const clipDescription = generateClipDescription(video, segment);
-      const clipTags = generateClipTags(video.title);
-
-      // ── Save clip to DB ──────────────────────────────────────────
-      await updateJobStatus(jobId, 'extracting', 95, 'Saving clip metadata');
-      const clip = await prisma.clip.create({
+      // ────────────────────────────────────────────────────────────
+      // 7. Create Clip record in database
+      // ────────────────────────────────────────────────────────────
+      await prisma.clip.create({
         data: {
           segmentId: segment.id,
           videoId: video.id,
           s3Key: clipKey,
-          thumbnailKey, // null if failed
-          title: clipTitle,
-          description: clipDescription,
-          tags: clipTags,
+          thumbnailKey,
+          title: `${video.title} - Clip`,
+          description: segment.reason || 'Auto-generated clip',
+          tags: [],
           status: 'ready_for_review',
         },
       });
 
-      console.log(`[segment:${segmentId}] Clip saved → ${clip.id} "${clipTitle}"`);
+      // Update segment with caption data (stored in existing fields)
+      await prisma.segment.update({
+        where: { id: segmentId },
+        data: {
+          status: 'extracted',
+          hasCaptions: captionData !== null,
+          captionStyle: captionData ? 'viral' : null,
+          captionData:
+            captionData !== null
+              ? (JSON.parse(JSON.stringify(captionData)) as Prisma.InputJsonValue)
+              : Prisma.JsonNull,
+        },
+      });
 
-      // ── Cleanup & completion check ───────────────────────────────
-      await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
-      await checkJobCompletion(jobId, videoId);
-
-      return { success: true, clipId: clip.id, clipKey };
-    } catch (error: any) {
-      console.error(`[segment:${segmentId}] Extraction failed:`, error.message);
-
-      if (workDir) {
-        await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+      // Update parent job if provided
+      if (jobId) {
+        await updateJobProgress(jobId);
       }
 
-      try {
-        await prisma.segment
-          .update({
-            where: { id: segmentId },
-            data: { status: 'failed' },
-          })
-          .catch((dbErr) => {
-            console.error('Failed to mark segment failed:', dbErr);
-          });
-      } catch (dbErr) {
-        console.error('Failed to update segment status:', dbErr);
-      }
+      console.log(`✅ Clip extraction complete: ${clipKey}`);
 
-      throw error;
+      return {
+        success: true,
+        clipKey,
+        thumbnailKey,
+        hasCaptions: captionData !== null,
+        captionCount: captionData?.length || 0,
+      };
+    } catch (err: any) {
+      console.error(`[Job ${job.id}] Extraction failed:`, err.message);
+
+      // Update segment status
+      await prisma.segment
+        .update({
+          where: { id: segmentId },
+          data: {
+            status: 'failed',
+          },
+        })
+        .catch(() => {});
+
+      throw err;
+    } finally {
+      // Cleanup temp directory
+      if (tempDir) {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
     }
   },
   {
     connection,
-    concurrency: 2, // lowered slightly – arm64 can struggle with 3+ ffmpeg
-    removeOnComplete: { count: 100 },
-    removeOnFail: { count: 200 },
+    concurrency: parseInt(process.env.EXTRACTION_CONCURRENCY || '2'),
+    limiter: {
+      max: 5,
+      duration: 1000,
+    },
   }
 );
 
-// ── Worker events ────────────────────────────────────────────────────────
-worker.on('completed', (job) => console.log(`Job ${job.id} completed`));
-worker.on('failed', (job, err) => console.error(`Job ${job?.id} failed:`, err.message));
-worker.on('error', (err) => console.error('Worker error:', err));
-worker.on('ready', () => console.log('Extraction Worker ready!'));
+// ────────────────────────────────────────────────────────────────
+// Worker Event Handlers
+// ────────────────────────────────────────────────────────────────
 
-// ── Helper functions ─────────────────────────────────────────────────────
-async function updateJobStatus(jobId: string, status: string, progress: number, step: string) {
-  try {
-    await prisma.job.update({
-      where: { id: jobId },
-      data: { status, progress, currentStep: step, updatedAt: new Date() },
-    });
-  } catch (err) {
-    console.error('Status update failed:', err);
-  }
-}
+worker.on('completed', (job) => {
+  console.log(`[Job ${job.id}] ✅ Extraction completed`);
+});
 
-async function checkJobCompletion(jobId: string, videoId: string) {
-  const [total, done] = await Promise.all([
-    prisma.segment.count({ where: { videoId } }),
-    prisma.clip.count({ where: { videoId } }),
-  ]);
+worker.on('failed', (job, err) => {
+  console.error(`[Job ${job?.id ?? '?'}] ❌ Extraction failed:`, err.message);
+});
 
-  if (done >= total && total > 0) {
-    await updateJobStatus(jobId, 'completed', 100, `All ${total} clips ready`);
-    await prisma.job.update({
-      where: { id: jobId },
-      data: { completedAt: new Date() },
-    });
-    console.log(`Job ${jobId} fully completed`);
-  }
-}
-
-function generateClipTitle(title: string, segment: { compositeScore: number }): string {
-  const short = title.length > 60 ? title.slice(0, 57) + '…' : title;
-  const emoji = segment.compositeScore >= 0.9 ? '🔥' : segment.compositeScore >= 0.8 ? '⚡' : '✨';
-  return `${short} ${emoji}`;
-}
-
-function generateClipDescription(
-  video: { title: string; youtubeUrl: string },
-  segment: any
-): string {
-  const score = Math.round(segment.compositeScore * 100);
-  return `Powerful moment from "${video.title}"
-
-Engagement: ${score}/100
-Source: ${video.youtubeUrl}
-
-#Shorts #Viral #Highlight`;
-}
-
-function generateClipTags(title: string): string[] {
-  const base = ['shorts', 'viral', 'trending', 'highlight', 'fyp'];
-  const words = title
-    .toLowerCase()
-    .replace(/[^\w\s]/g, '')
-    .split(/\s+/)
-    .filter((w) => w.length > 3)
-    .slice(0, 6);
-  return Array.from(new Set([...base, ...words]));
-}
+worker.on('error', (err) => {
+  console.error('⚠️ Worker-level error:', err);
+});
 
 // Graceful shutdown
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
-
-async function shutdown() {
-  console.log('Shutdown signal received...');
+process.on('SIGTERM', async () => {
+  console.log('📴 SIGTERM received, shutting down gracefully...');
   await worker.close();
-  await prisma.$disconnect();
   process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('📴 SIGINT received, shutting down gracefully...');
+  await worker.close();
+  process.exit(0);
+});
+
+// ────────────────────────────────────────────────────────────────
+// Helper Functions
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Extract video clip with optimal settings for Shorts/Reels
+ * - 9:16 aspect ratio (1080x1920)
+ * - High quality encoding (H.264)
+ * - Optimized for mobile playback
+ */
+async function extractClip(
+  inputPath: string,
+  startTime: number,
+  endTime: number,
+  outputPath: string
+): Promise<void> {
+  const duration = endTime - startTime;
+
+  // FFmpeg command for high-quality 9:16 vertical clip
+  const command = `
+    ffmpeg -ss ${startTime} -i "${inputPath}" -t ${duration} \
+    -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" \
+    -c:v libx264 -preset medium -crf 23 \
+    -c:a aac -b:a 128k -ar 44100 \
+    -movflags +faststart \
+    -y "${outputPath}"
+  `
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  await execAsync(command);
 }
 
-console.log('Extraction Worker initialized!');
+/**
+ * Generate thumbnail from video (middle frame)
+ */
+async function generateThumbnail(videoPath: string, outputPath: string): Promise<void> {
+  // Get video duration first
+  const durationCmd = `
+    ffprobe -v error -show_entries format=duration \
+    -of default=noprint_wrappers=1:nokey=1 "${videoPath}"
+  `
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const { stdout } = await execAsync(durationCmd);
+  const duration = parseFloat(stdout.trim());
+  const midPoint = duration / 2;
+
+  // Extract frame at midpoint
+  const command = `
+    ffmpeg -ss ${midPoint} -i "${videoPath}" \
+    -vframes 1 -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" \
+    -q:v 2 -y "${outputPath}"
+  `
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  await execAsync(command);
+}
+
+/**
+ * Update segment status
+ */
+async function updateSegmentStatus(segmentId: string, status: string): Promise<void> {
+  try {
+    await prisma.segment.update({
+      where: { id: segmentId },
+      data: { status },
+    });
+  } catch (err) {
+    console.warn(`Failed to update segment ${segmentId} status:`, err);
+  }
+}
+
+/**
+ * Update parent job progress
+ * Counts completed segments vs total
+ */
+async function updateJobProgress(jobId: string): Promise<void> {
+  try {
+    const job = await prisma.job.findUnique({
+      where: { id: jobId },
+      include: {
+        video: {
+          include: {
+            segments: {
+              select: { status: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!job || !job.video) return;
+
+    const totalSegments = job.video.segments.length;
+    const extractedSegments = job.video.segments.filter((s) => s.status === 'extracted').length;
+
+    const progress = totalSegments > 0 ? Math.round((extractedSegments / totalSegments) * 100) : 0;
+
+    await prisma.job.update({
+      where: { id: jobId },
+      data: {
+        progress,
+        currentStep: `Extracted ${extractedSegments}/${totalSegments} clips`,
+      },
+    });
+  } catch (err) {
+    console.warn(`Failed to update job ${jobId} progress:`, err);
+  }
+}
+
+console.log('✅ Clip Extraction Worker ready');
+console.log(`⚙️ Concurrency: ${process.env.EXTRACTION_CONCURRENCY || '2'}`);
+console.log(`🎨 Captions: ${process.env.ENABLE_CAPTIONS !== 'false' ? 'enabled' : 'disabled'}`);

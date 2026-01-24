@@ -108,6 +108,9 @@ model Segment {
   signals         Json
   reason          String?
   status          String   @default("detected")
+   hasCaptions   Boolean  @default(false)
+  captionStyle  String?  // 'viral', 'minimal', 'none'
+  captionData   Json?    // Store CaptionSegment[] for editing
   
   createdAt       DateTime @default(now())
 
