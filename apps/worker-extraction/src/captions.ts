@@ -1,11 +1,14 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import * as fs from 'fs/promises';
 import * as path from 'path';
+import * as fs from 'fs/promises';
 import OpenAI from 'openai';
 
 const execAsync = promisify(exec);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 120000,
+});
 
 export interface WordTimestamp {
   word: string;
@@ -24,8 +27,7 @@ export interface CaptionSegment {
 }
 
 /**
- * Generate viral-style captions with word-level timestamps
- * Perfect for TikTok/Reels/Shorts
+ * Main function: Generate viral-style captions with timestamps
  */
 export async function generateViralCaptions(
   videoPath: string,
@@ -33,38 +35,41 @@ export async function generateViralCaptions(
   endTime: number
 ): Promise<CaptionSegment[]> {
   const duration = endTime - startTime;
-
-  // Extract audio
   const tempDir = `/tmp/captions-${Date.now()}`;
-  await execAsync(`mkdir -p ${tempDir}`);
-  const audioPath = path.join(tempDir, 'audio.mp3');
 
   try {
+    await fs.mkdir(tempDir, { recursive: true });
+    const audioPath = path.join(tempDir, 'audio.mp3');
+
+    console.log('🎤 Extracting audio segment...');
     await extractAudio(videoPath, startTime, duration, audioPath);
 
-    // Get word-level transcription from Whisper
-    const wordTimestamps = await transcribeWithWordTimestamps(audioPath);
+    console.log('🔤 Transcribing with Whisper (word-level timestamps)...');
+    const wordTimestamps = await transcribeWithWhisper(audioPath);
 
-    // Group words into caption segments (2-5 words per screen)
-    const captionSegments = groupIntoSegments(wordTimestamps);
+    if (wordTimestamps.length === 0) {
+      console.warn('No words transcribed → returning empty captions');
+      return [];
+    }
 
-    // Enhance with styling and emojis
-    const styledSegments = applyViralStyling(captionSegments);
+    console.log(`Transcribed ${wordTimestamps.length} words`);
 
-    // Cleanup
-    await execAsync(`rm -rf ${tempDir}`);
+    const analysis = analyzeTranscript(wordTimestamps, duration);
+    const rawSegments = groupIntoSegments(analysis.words);
+    const styledSegments = applyViralStyling(rawSegments);
 
     return styledSegments;
 
   } catch (error: any) {
     console.error('Caption generation failed:', error.message);
-    await execAsync(`rm -rf ${tempDir}`).catch(() => {});
     return [];
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
 /**
- * Extract audio from video segment
+ * Extract audio segment from video
  */
 async function extractAudio(
   videoPath: string,
@@ -81,33 +86,37 @@ async function extractAudio(
 }
 
 /**
- * Transcribe with word-level timestamps using Whisper
+ * Transcribe audio with word-level timestamps using Whisper
  */
-async function transcribeWithWordTimestamps(
-  audioPath: string
-): Promise<WordTimestamp[]> {
+async function transcribeWithWhisper(audioPath: string): Promise<WordTimestamp[]> {
   try {
-    // Use Whisper with word timestamps
-    const response = await openai.audio.transcriptions.create({
-      file: await fs.readFile(audioPath).then(buf => 
-        new File([buf], 'audio.mp3', { type: 'audio/mpeg' })
-      ),
+    const fileBuffer = await fs.readFile(audioPath);
+    const file = new File([fileBuffer], 'audio.mp3', { type: 'audio/mpeg' });
+
+    console.log('Sending audio to Whisper API...');
+    const result = await openai.audio.transcriptions.create({
+      file,
       model: 'whisper-1',
       response_format: 'verbose_json',
       timestamp_granularities: ['word'],
+      language: 'en', // change if needed
+      temperature: 0,
     }) as any;
 
-    if (response.words) {
-      return response.words.map((w: any) => ({
+    if (result.words && result.words.length > 0) {
+      console.log(`Whisper returned ${result.words.length} word timestamps`);
+      return result.words.map((w: any) => ({
         word: w.word.trim(),
         start: w.start,
         end: w.end,
+        confidence: w.confidence,
       }));
     }
 
-    // Fallback: split by spaces
-    const words = response.text.split(/\s+/);
-    const avgDuration = response.duration / words.length;
+    // Fallback: split text evenly
+    console.warn('No word timestamps → falling back to text split');
+    const words = result.text.split(/\s+/);
+    const avgDuration = (result.duration || 30) / words.length;
 
     return words.map((word: string, i: number) => ({
       word,
@@ -115,35 +124,44 @@ async function transcribeWithWordTimestamps(
       end: (i + 1) * avgDuration,
     }));
 
-  } catch (error) {
-    console.error('Whisper word timestamps failed:', error);
+  } catch (error: any) {
+    console.error('Whisper transcription failed:', error.message);
     return [];
   }
 }
 
 /**
- * Group words into caption segments
- * Strategy: 2-4 words per segment, break at natural pauses
+ * Analyze transcript (basic metrics)
+ */
+function analyzeTranscript(words: WordTimestamp[], duration: number) {
+  return {
+    words: words.map(w => ({
+      word: w.word.trim(),
+      start: w.start,
+      end: w.end,
+    })),
+    totalWords: words.length,
+    speechDensity: duration > 0 ? words.length / duration : 0,
+  };
+}
+
+/**
+ * Group words into readable caption segments (2-5 words)
  */
 function groupIntoSegments(words: WordTimestamp[]): CaptionSegment[] {
   const segments: CaptionSegment[] = [];
   let currentGroup: WordTimestamp[] = [];
-  const TARGET_WORDS = 3; // Optimal for readability
+  const TARGET_WORDS = 3;
 
   for (let i = 0; i < words.length; i++) {
     const word = words[i];
     currentGroup.push(word);
 
-    // Decide if we should break here
-    const shouldBreak = 
-      currentGroup.length >= TARGET_WORDS && (
-        // Natural pause (punctuation detected)
-        /[,;.!?]/.test(word.word) ||
-        // Long pause before next word
+    const shouldBreak =
+      currentGroup.length >= TARGET_WORDS &&
+      ( /[,;.!?]/.test(word.word) ||
         (i < words.length - 1 && words[i + 1].start - word.end > 0.3) ||
-        // Force break at max length
-        currentGroup.length >= 5
-      );
+        currentGroup.length >= 5 );
 
     if (shouldBreak || i === words.length - 1) {
       segments.push({
@@ -161,30 +179,24 @@ function groupIntoSegments(words: WordTimestamp[]): CaptionSegment[] {
 }
 
 /**
- * Apply viral styling: emojis, emphasis, hooks
+ * Apply viral styling (hooks, emphasis, emojis)
  */
 function applyViralStyling(segments: CaptionSegment[]): CaptionSegment[] {
   return segments.map((seg, index) => {
     const text = seg.text.toLowerCase();
 
-    // Detect hooks (first segment with question/excitement)
-    if (index === 0) {
-      if (/\b(what|how|why|watch|wait|imagine)\b/i.test(text)) {
-        return { ...seg, style: 'hook', emoji: '👀' };
-      }
+    if (index === 0 && /\b(what|how|why|watch|wait|imagine)\b/i.test(text)) {
+      return { ...seg, style: 'hook', emoji: '👀' };
     }
 
-    // Detect emphasis words
     if (/\b(amazing|crazy|insane|unbelievable|shocking|incredible)\b/i.test(text)) {
       return { ...seg, style: 'emphasis', emoji: '🔥' };
     }
 
-    // Detect punchlines (exclamation marks, "but", "however")
     if (/[!]|but |however /i.test(text)) {
       return { ...seg, style: 'punchline', emoji: '💥' };
     }
 
-    // Detect numbers (lists perform well)
     if (/\b\d+\b/.test(text)) {
       return { ...seg, style: 'emphasis', emoji: '✨' };
     }
@@ -194,7 +206,7 @@ function applyViralStyling(segments: CaptionSegment[]): CaptionSegment[] {
 }
 
 /**
- * Generate SRT subtitle file
+ * Generate SRT file (simple, reliable for fallback)
  */
 export function generateSRT(segments: CaptionSegment[]): string {
   return segments.map((seg, index) => {
@@ -207,8 +219,7 @@ export function generateSRT(segments: CaptionSegment[]): string {
 }
 
 /**
- * Generate ASS subtitle file with styling
- * This enables custom fonts, colors, animations
+ * Generate ASS file with styling (better for custom looks)
  */
 export function generateASS(segments: CaptionSegment[]): string {
   const header = `[Script Info]
@@ -217,13 +228,14 @@ ScriptType: v4.00+
 WrapStyle: 0
 PlayResX: 1080
 PlayResY: 1920
+ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Normal,Arial Black,80,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,10,10,80,1
-Style: Emphasis,Arial Black,90,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,110,110,0,0,1,5,3,2,10,10,80,1
-Style: Hook,Arial Black,95,&H0000FF00,&H000000FF,&H00000000,&H80000000,-1,0,0,0,115,115,0,0,1,5,3,2,10,10,80,1
-Style: Punchline,Arial Black,85,&H000080FF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,105,105,0,0,1,5,3,2,10,10,80,1
+Style: Normal,Arial Black,70,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,10,10,60,1
+Style: Emphasis,Arial Black,80,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,110,110,0,0,1,4,2,2,10,10,60,1
+Style: Hook,Arial Black,85,&H0000FF00,&H000000FF,&H00000000,&H80000000,-1,0,0,0,115,115,0,0,1,4,2,2,10,10,60,1
+Style: Punchline,Arial Black,75,&H000080FF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,105,105,0,0,1,4,2,2,10,10,60,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -232,9 +244,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
   const events = segments.map(seg => {
     const start = formatASSTime(seg.start);
     const end = formatASSTime(seg.end);
-    const style = seg.style === 'normal' ? 'Normal' :
-                  seg.style === 'emphasis' ? 'Emphasis' :
-                  seg.style === 'hook' ? 'Hook' : 'Punchline';
+    const style = seg.style.charAt(0).toUpperCase() + seg.style.slice(1);
     const text = seg.emoji ? `${seg.emoji} ${seg.text}` : seg.text;
 
     return `Dialogue: 0,${start},${end},${style},,0,0,0,,${text}`;
@@ -244,82 +254,71 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 }
 
 /**
- * Burn captions into video using FFmpeg
- */
-/**
- * Burn captions into video using FFmpeg - IMPROVED VERSION
+ * Burn subtitles into video (ASS preferred, SRT fallback)
+ * Based on: https://trac.ffmpeg.org/wiki/HowToBurnSubtitlesIntoVideo
  */
 export async function burnCaptions(
   videoPath: string,
   captionsPath: string,
   outputPath: string,
-  format: 'srt' | 'ass' = 'srt' // Default to SRT for better compatibility
+  format: 'srt' | 'ass' = 'ass'
 ): Promise<void> {
+  console.log(`\n🔥 Starting caption burn (${format.toUpperCase()})`);
+  console.log('  Input:', videoPath);
+  console.log('  Subtitles:', captionsPath);
+  console.log('  Output:', outputPath);
+
+  // Verify input files exist
+  if (!(await fs.stat(videoPath).catch(() => false))) throw new Error('Video file not found');
+  if (!(await fs.stat(captionsPath).catch(() => false))) throw new Error('Subtitle file not found');
+
   let command: string;
 
-  if (format === 'srt') {
-    // Use subtitles filter with force_style for SRT
-    // This is more reliable than ASS in many cases
-    const style = [
-      "FontName=Arial Black",
-      "FontSize=28",
-      "PrimaryColour=&HFFFFFF",
-      "OutlineColour=&H000000",
-      "BorderStyle=3",
-      "Outline=3",
-      "Shadow=2",
-      "Bold=1",
-      "Alignment=2" // Bottom center
-    ].join(',');
-
+  if (format === 'ass') {
+    const escapedAss = captionsPath.replace(/'/g, "'\\''");
     command = `
-      ffmpeg -i "${videoPath}" \
-      -vf "subtitles='${captionsPath}':force_style='${style}'" \
+      ffmpeg -i "${videoPath.replace(/"/g, '\\"')}" \
+      -vf "ass=${escapedAss}" \
       -c:v libx264 -preset medium -crf 23 \
-      -c:a copy -movflags +faststart \
-      -y "${outputPath}"
+      -c:a copy -y "${outputPath.replace(/"/g, '\\"')}"
     `.replace(/\s+/g, ' ').trim();
   } else {
-    // ASS format - requires proper path escaping
-    const escapedPath = captionsPath.replace(/\\/g, '/').replace(/'/g, "'\\''");
-    
+    const style = "FontName=Arial,FontSize=28,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,Outline=2,Shadow=1,Bold=1,Alignment=2,MarginV=40";
     command = `
-      ffmpeg -i "${videoPath}" \
-      -vf "ass='${escapedPath}'" \
+      ffmpeg -i "${videoPath.replace(/"/g, '\\"')}" \
+      -vf "subtitles=${captionsPath.replace(/'/g, "'\\''")}:force_style='${style}'" \
       -c:v libx264 -preset medium -crf 23 \
-      -c:a copy -movflags +faststart \
-      -y "${outputPath}"
+      -c:a copy -y "${outputPath.replace(/"/g, '\\"')}"
     `.replace(/\s+/g, ' ').trim();
   }
 
-  console.log(`🔥 Burning ${format.toUpperCase()} captions into video...`);
-  console.log(`Command: ${command.substring(0, 150)}...`);
-  
+  console.log('FFmpeg command:', command);
+
   try {
-    const {  stderr } = await execAsync(command, {
-      maxBuffer: 10 * 1024 * 1024, // 10MB buffer
-    });
-    
-    if (stderr && !stderr.includes('frame=')) {
-      console.warn('FFmpeg warnings:', stderr.substring(0, 500));
+    const { stderr } = await execAsync(command, { maxBuffer: 1024 * 1024 * 5 });
+
+    if (stderr) {
+      console.warn('FFmpeg warnings/errors:', stderr.slice(0, 2000));
     }
-    
-    console.log('✅ Captions burned successfully');
-  } catch (error: any) {
-    console.error('❌ Caption burning failed:', error.message);
-    console.error('Full command:', command);
-    throw new Error(`Failed to burn captions: ${error.message}`);
+
+    const stat = await fs.stat(outputPath);
+    console.log(`Burn complete → output size: ${(stat.size / (1024 * 1024)).toFixed(2)} MB`);
+  } catch (err: any) {
+    console.error('FFmpeg burn FAILED:', err.message);
+    if (err.stderr) console.error('Stderr:', err.stderr);
+    throw err;
   }
 }
 
-// Helper functions
+// ──────────────────────────────────────────────────────────────
+// Time formatting helpers
+// ──────────────────────────────────────────────────────────────
 
 function formatSRTTime(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
   const ms = Math.floor((seconds % 1) * 1000);
-
   return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
 }
 
@@ -328,11 +327,9 @@ function formatASSTime(seconds: number): string {
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
   const cs = Math.floor((seconds % 1) * 100);
-
   return `${h}:${pad(m)}:${pad(s)}.${pad(cs)}`;
 }
 
 function pad(num: number, length: number = 2): string {
   return num.toString().padStart(length, '0');
 }
-
