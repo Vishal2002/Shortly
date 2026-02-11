@@ -12,7 +12,18 @@ RUN apk add --no-cache \
     wget \
     build-base \
     git \
-    nodejs
+    nodejs \
+    fontconfig \
+    ttf-dejavu \
+    font-noto \
+    font-noto-emoji \
+    font-noto-extra \
+    font-liberation \
+    font-inconsolata \
+    msttcorefonts-installer
+
+# Or create a fonts cache
+RUN fc-cache -f -v
 
 # Update CA certificates
 RUN update-ca-certificates

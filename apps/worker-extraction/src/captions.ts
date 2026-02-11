@@ -180,25 +180,55 @@ function groupIntoSegments(words: WordTimestamp[]): CaptionSegment[] {
 
 /**
  * Apply viral styling (hooks, emphasis, emojis)
+ * Now with MORE emojis for engagement!
  */
 function applyViralStyling(segments: CaptionSegment[]): CaptionSegment[] {
   return segments.map((seg, index) => {
     const text = seg.text.toLowerCase();
 
-    if (index === 0 && /\b(what|how|why|watch|wait|imagine)\b/i.test(text)) {
+    // HOOKS - First caption or question words
+    if (index === 0 && /\b(what|how|why|watch|wait|imagine|listen|check|look)\b/i.test(text)) {
       return { ...seg, style: 'hook', emoji: '👀' };
     }
+    
+    // First caption fallback - always make it engaging
+    if (index === 0) {
+      return { ...seg, style: 'hook', emoji: '🎯' };
+    }
 
-    if (/\b(amazing|crazy|insane|unbelievable|shocking|incredible)\b/i.test(text)) {
+    // POWER WORDS - Emphasis
+    if (/\b(amazing|crazy|insane|unbelievable|shocking|incredible|perfect|awesome|boom|wow)\b/i.test(text)) {
       return { ...seg, style: 'emphasis', emoji: '🔥' };
     }
 
-    if (/[!]|but |however /i.test(text)) {
+    // SUCCESS/MONEY words
+    if (/\b(money|dollars|profit|revenue|million|thousand|rich|success|win)\b/i.test(text)) {
+      return { ...seg, style: 'emphasis', emoji: '💰' };
+    }
+
+    // CONTRAST/PUNCHLINES
+    if (/[!]|\bbut\b|\bhowever\b|\bwait\b|\bactually\b|\bhere's\b/i.test(text)) {
       return { ...seg, style: 'punchline', emoji: '💥' };
     }
 
+    // NUMBERS - Always highlight stats
     if (/\b\d+\b/.test(text)) {
-      return { ...seg, style: 'emphasis', emoji: '✨' };
+      return { ...seg, style: 'emphasis', emoji: '📊' };
+    }
+
+    // ACTION words
+    if (/\b(do|make|get|start|build|create|learn|discover)\b/i.test(text)) {
+      return { ...seg, style: 'normal', emoji: '⚡' };
+    }
+
+    // NEGATIVE/WARNING words
+    if (/\b(don't|never|stop|avoid|mistake|wrong|fail)\b/i.test(text)) {
+      return { ...seg, style: 'punchline', emoji: '⚠️' };
+    }
+
+    // Every 3rd caption gets an emoji for variety
+    if (index > 0 && index % 3 === 0) {
+      return { ...seg, style: 'normal', emoji: '✨' };
     }
 
     return seg;
@@ -219,11 +249,16 @@ export function generateSRT(segments: CaptionSegment[]): string {
 }
 
 /**
- * Generate ASS file with styling (better for custom looks)
+ * Generate ASS file with Alex Hormozi viral style
+ * - Uses Impact/Liberation Sans for bold look
+ * - Noto Color Emoji for emoji support
+ * - Medium-large, uppercase text
+ * - Yellow/white colors for emphasis
+ * - Heavy black outline for readability
  */
 export function generateASS(segments: CaptionSegment[]): string {
   const header = `[Script Info]
-Title: Viral Captions
+Title: Viral Captions - Hormozi Style
 ScriptType: v4.00+
 WrapStyle: 0
 PlayResX: 1080
@@ -232,10 +267,10 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Normal,Arial Black,70,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,2,10,10,60,1
-Style: Emphasis,Arial Black,80,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,110,110,0,0,1,4,2,2,10,10,60,1
-Style: Hook,Arial Black,85,&H0000FF00,&H000000FF,&H00000000,&H80000000,-1,0,0,0,115,115,0,0,1,4,2,2,10,10,60,1
-Style: Punchline,Arial Black,75,&H000080FF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,105,105,0,0,1,4,2,2,10,10,60,1
+Style: Normal,Liberation Sans,65,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,2,5,15,15,400,1
+Style: Emphasis,Liberation Sans,72,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,108,108,1,0,1,6,3,5,15,15,400,1
+Style: Hook,Liberation Sans,78,&H00FFFF00,&H000000FF,&H00000000,&H80000000,-1,0,0,0,112,112,2,0,1,6,3,5,15,15,350,1
+Style: Punchline,Liberation Sans,68,&H0000D4FF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,106,106,1,0,1,6,3,5,15,15,400,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -245,9 +280,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     const start = formatASSTime(seg.start);
     const end = formatASSTime(seg.end);
     const style = seg.style.charAt(0).toUpperCase() + seg.style.slice(1);
-    const text = seg.emoji ? `${seg.emoji} ${seg.text}` : seg.text;
+    
+    // Make text uppercase for Hormozi style impact
+    const text = seg.text.toUpperCase();
+    
+    // Add emoji with font fallback for proper rendering
+    // This ensures emojis render using Noto Color Emoji font
+    const textWithEmoji = seg.emoji 
+      ? `{\\fnNotoColorEmoji}${seg.emoji}{\\fn} ${text}`
+      : text;
 
-    return `Dialogue: 0,${start},${end},${style},,0,0,0,,${text}`;
+    return `Dialogue: 0,${start},${end},${style},,0,0,0,,${textWithEmoji}`;
   }).join('\n');
 
   return header + events;
